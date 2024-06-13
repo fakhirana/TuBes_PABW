@@ -1,146 +1,229 @@
-const connection = require("../config/database");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const { validateAuthorization } = require("../utils/Authorization");
-const { validateUser } = require("../utils/validateUser");
+const { validateUser, generateToken } = require("../utils/validateUser");
+const { queryPromise } = require("../utils/promise");
 
-exports.getAllUsers = (req, res) => {
-    connection.query("SELECT * FROM user", (err, rows) => {
-        if (err) {
-            res.status(500).send({ error: "Database query failed" });
-        } else {
-            res.status(200).json(rows);
+exports.getAllUsers = async (req, res) => {
+    const authorizedUser = validateAuthorization(req.headers.authorization);
+    if (!authorizedUser) {
+        return res.status(401).send("Unauthorized: Invalid or missing token");
+    }
+    const token = req.headers.authorization.split(" ")[1];
+    const user = validateUser(token);
+    if (!user) {
+        return res.status(401).send("Invalid token");
+    }
+
+    try {
+        const userQuery = "SELECT * FROM user WHERE id = ?";
+        const rows = await queryPromise(userQuery, [user.id]);
+        const data = rows[0];
+        if (data.role !== "admin") {
+            return res.status(401).send("Unauthorized: Only admins can get users");
         }
-    });
+
+        const allUsersQuery = "SELECT * FROM user";
+        const allUsers = await queryPromise(allUsersQuery);
+        res.status(200).json(allUsers);
+    } catch (err) {
+        console.error("Database query failed: ", err);
+        res.status(500).send({ error: "Database query failed" });
+    }
 };
 
-exports.getUserById = (req, res) => {
-    connection.query(
-        "SELECT * FROM user WHERE id = ?",
-        [req.params.id],
-        (err, rows) => {
-        if (err) {
-            res.status(500).send({ error: "Database query failed" });
-        } else if (rows.length === 0) {
-            res.status(404).send({ error: "User not found" });
-        } else {
-            res.status(200).json(rows[0]);
+exports.getUserById = async (req, res) => {
+    const query = `SELECT * FROM user WHERE id = ?`;
+    try {
+        const rows = await queryPromise(query, [req.params.id]);
+        if (rows.length === 0) {
+            return res.status(404).send({ error: "User not found" });
         }
-        }
-    );
-};
-
-const UserRole = {
-    ADMIN: 'admin',
-    USER: 'user',
+        res.status(200).json(rows[0]);
+    } catch (err) {
+        console.error("Database query failed: ", err);
+        res.status(500).send({ error: "Database query failed" });
+    }
 };
 
 exports.Register = async (req, res) => {
-    const { full_name, email, username, password, phone } = req.body;
-    const role = req.body.role?.toLowerCase();
-
-    if (role && !Object.values(UserRole).includes(role)) {
-    return res.status(400).send({ error: 'Invalid role. Valid roles: admin, user' });
-    }
+    const { email, full_name, username, password, phone, action } = req.body;
 
     try {
-        const [existingUser] = await connection.promise().query("SELECT * FROM user WHERE email = ?", [email]);
-        if (existingUser.length > 0) {
-        return res.status(400).send({ error: 'Email is already in use' });
+        const existingUserQuery = `SELECT * FROM user WHERE username = ?`;
+        const rows = await queryPromise(existingUserQuery, [username]);
+
+        if (action === "check") {
+            if (rows.length > 0) {
+                return res.status(400).send({ error: "username is already in use" });
+            } else {
+                return res.status(200).send({ message: "username is available" });
+            }
+        }
+
+        if (rows.length > 0) {
+            return res.status(400).send({ error: "username is already in use" });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const insertRole = role || UserRole.USER;
-
-        const query = "INSERT INTO user (full_name, email, username, password, phone, role) VALUES (?, ?, ?, ?, ?, ?)";
-        await connection.promise().query(query, [full_namename, email, username, hashedPassword, phone, insertRole]);
-
-        res.status(201).send({ message: 'Registered successfully' });
-    } catch (error) {
-        console.error('Registration failed:', error);
-        res.status(500).send({ error: 'Registration failed' });
+        const query =
+            "INSERT INTO user (email, full_name, username, password, phone, role) VALUES (?, ?, ?, ?, ?, 'user')";
+        await queryPromise(query, [
+            email,
+            full_name,
+            username,
+            hashedPassword,
+            phone,
+        ]);
+        res.status(201).send({ message: "Registered successfully" });
+    } catch (err) {
+        console.error("Database query failed: ", err);
+        res.status(500).send({ error: "Database query failed" });
     }
-    };
+};
 
-    exports.Login = async (req, res) => {
+exports.Login = async (req, res) => {
+    const { username, password } = req.body;
+    const query = `SELECT * FROM user WHERE username = ?`;
     try {
-        const [rows] = await connection.promise().query("SELECT * FROM user WHERE username = ?", [req.body.username]);
+        const rows = await queryPromise(query, [username]);
         if (rows.length === 0) {
-        return res.status(401).send({ error: "Invalid username or password" });
+            console.error("Username atau password tidak valid");
+            return res.status(401).send({ error: "Username atau password tidak valid" });
         }
 
         const user = rows[0];
-        const match = await bcrypt.compare(req.body.password, user.password);
+        const match = await bcrypt.compare(password, user.password);
         if (!match) {
-        return res.status(401).send({ error: "Invalid username or password" });
+            return res.status(401).send({ error: "Username atau password tidak valid" });
         }
 
-        const token = jwt.sign({ id: user.id }, "assalamualaikumwarohmatullahiwabarokatuh");
+        const token = generateToken(user.id);
         res.status(200).send({ token });
-    } catch (error) {
-        console.error('Login failed:', error);
-        res.status(500).send({ error: 'Login failed' });
+    } catch (err) {
+        console.error("Kueri database gagal: ", err);
+        res.status(500).send({ error: "Kueri database gagal" });
     }
-    };
+};
 
-    exports.editProfile = async (req, res) => {
-    const {full_name, password } = req.body;
-    const authorizedUser = validateAuthorization(req.headers.authorization);
-    if (!authorizedUser) {
-        return res.status(401).send("Unauthorized: Invalid or missing token");
+
+
+exports.getUserData = async (req, res) => {
+    if (!validateAuthorization(req.headers.authorization)) {
+        return res.status(401).send({ error: "Authorization header is missing or invalid" });
+    }
+
+    const token = req.headers.authorization.split(' ')[1];
+    const user = validateUser(token);
+    if (!user) {
+        return res.status(401).send({ error: "Invalid token" });
     }
 
     try {
-        const token = req.headers.authorization.split(" ")[1];
-        const user = validateUser(token);
-        if (!user) {
-        return res.status(401).send("Invalid token");
-        }
-
-        const [rows] = await connection.promise().query("SELECT * FROM user WHERE id = ?", [user.id]);
+        const query = `SELECT email, full_name, phone, username, avatar FROM user WHERE id = ?`;
+        const rows = await queryPromise(query, [user.id]);
         if (rows.length === 0) {
-        return res.status(404).send({ error: "User not found" });
+            return res.status(404).send({ error: "User not found" });
         }
 
-        const data = rows[0];
-        const hashedPassword = password ? await bcrypt.hash(password, 10) : data.password;
-        const newName =full_name || data.name;
-        const query = "UPDATE user SETfull_name = ?, password = ? WHERE id = ?";
-        await connection.promise().query(query, [newName, hashedPassword, user.id]);
+        const userData = rows[0];
+        userData.avatar = userData.avatar.toString('base64');
 
-        res.status(200).send({ message: "Profile updated successfully" });
-    } catch (error) {
-        console.error('Profile update failed:', error);
-        res.status(500).send({ error: 'Profile update failed' });
+        res.status(200).send(userData);
+    } catch (err) {
+        console.error("Failed to get user data: ", err);
+        res.status(500).send({ error: "Failed to get user data" });
     }
-    };
+};
 
-    exports.deleteUserById = async (req, res) => {
+exports.editProfile = async (req, res) => {
+    let { username, full_name, phone, password } = req.body;
     const authorizedUser = validateAuthorization(req.headers.authorization);
     if (!authorizedUser) {
         return res.status(401).send("Unauthorized: Invalid or missing token");
     }
+    const token = req.headers.authorization.split(" ")[1];
+    const user = validateUser(token);
+    if (!user) {
+        return res.status(401).send("Invalid token");
+    }
 
     try {
-        const token = req.headers.authorization.split(" ")[1];
-        const user = validateUser(token);
-        if (!user) {
-        return res.status(401).send("Invalid token");
-        }
+        const userQuery = `SELECT * FROM user WHERE id = ?`;
+        const rows = await queryPromise(userQuery, [user.id]);
+        const data = rows[0];
 
-        const [rows] = await connection.promise().query("SELECT * FROM user WHERE id = ?", [user.id]);
-        if (rows.length === 0 || rows[0].role !== UserRole.ADMIN) {
-        return res.status(401).send("You are not authorized to perform this action");
-        }
+        const hashedPassword = password
+            ? await bcrypt.hash(password, 10)
+            : data.password;
+        username = username || data.username;
+        full_name = full_name || data.full_name;
+        phone = phone || data.phone;
 
-        const [result] = await connection.promise().query("DELETE FROM user WHERE id = ?", [req.params.id]);
-        if (result.affectedRows === 0) {
-        return res.status(404).send({ error: "User not found" });
-        }
-
-        res.status(200).send({ message: User with ID ${req.params.id} deleted successfully });
-    } catch (error) {
-        console.error('Delete user failed:', error);
-        res.status(500).send({ error: 'Delete user failed' });
+        const updateQuery =
+            "UPDATE user SET username = ?, full_name = ?, phone = ?, password = ? WHERE id = ?";
+        await queryPromise(updateQuery, [
+            username,
+            full_name,
+            phone,
+            hashedPassword,
+            user.id,
+        ]);
+        res.status(200).send({ message: "Profile updated successfully" });
+    } catch (err) {
+        console.error("Database query failed: ", err);
+        res.status(500).send({ error: "Database query failed" });
     }
-    };
+};
+
+exports.deleteUserById = async (req, res) => {
+    const authorizedUser = validateAuthorization(req.headers.authorization);
+    if (!authorizedUser) {
+        return res.status(401).send("Unauthorized: Invalid or missing token");
+    }
+    const token = req.headers.authorization.split(" ")[1];
+    const user = validateUser(token);
+    if (!user) {
+        return res.status(401).send("Invalid token");
+    }
+
+    try {
+        const userQuery = "SELECT * FROM user WHERE id = ?";
+        const rows = await queryPromise(userQuery, [user.id]);
+        const data = rows[0];
+
+        if (data.role !== "admin") {
+            return res.status(401).send("Unauthorized: Only admins can delete users");
+        }
+
+        const deleteQuery = "DELETE FROM user WHERE id = ?";
+        const result = await queryPromise(deleteQuery, [req.params.id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).send({ message: "User not found" });
+        }
+        res
+            .status(200)
+            .send({ message: `User with id: ${req.params.id} deleted successfully` });
+    } catch (err) {
+        console.error("Database query failed: ", err);
+        res.status(500).send({ error: "Database query failed" });
+    }
+};
+
+exports.resetPassword = async (req, res) => {
+    const { username, newPassword } = req.body;
+    try {
+        const userQuery = "SELECT * FROM user WHERE username = ?";
+        const rows = await queryPromise(userQuery, [username]);
+        if (!rows) {
+            return res.send("username Not Found")
+        }
+        const hashedPassword = await bcrypt.hash(newPassword, 10)
+        const queryUpdate = `UPDATE user SET password = ? WHERE username = ?`
+        await queryPromise(queryUpdate, [hashedPassword, username])
+        res.status(200).send({ message: "Password updated successfully" });
+    } catch (err) {
+        console.error("Database query failed: ", err);
+        res.status(500).send({ error: "Database query failed" });
+    }
+}
