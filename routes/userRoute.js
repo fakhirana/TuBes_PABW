@@ -1,9 +1,12 @@
 const express = require("express");
 const router = express.Router();
-const photoController = require("../controllers/photoController");
-const multer = require("multer");
-const upload = multer({ dest: "upload" });
+const userController = require('../controllers/userController')
 
-router.get("/", photoController.photoGetAll);
-router.post("/photo", upload.single("photo"), photoController.uploadPhoto);
+router.get('/', userController.getAllUsers);
+router.get('/getInfo', userController.getUserData);
+router.get('/:id', userController.getUserById);
+router.delete('/:id', userController.deleteUserById);
+router.post('/login', userController.Login);
+router.post('/register', userController.Register);
+router.put('/editProfile', userController.editProfile);
 module.exports = router;
